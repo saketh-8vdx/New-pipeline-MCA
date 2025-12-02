@@ -722,9 +722,9 @@ schema = {
 # Streamlit UI
 # ==============================
 
-st.set_page_config(page_title="Bank Statement Extractor", page_icon="🏦", layout="wide")
+st.set_page_config(page_title="New-pipeline MCA", page_icon="🏦", layout="wide")
 
-st.title("🏦 Bank Statement Extractor")
+st.title("New-pipeline MCA")
 st.markdown("Upload PDF bank statements to extract structured data using Reducto AI")
 
 # Sidebar
