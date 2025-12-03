@@ -333,6 +333,133 @@ def extract_with_enhanced_ocr_async(fname: str, system_prompt: str, schema: dict
 
 
 # System prompt and schema (from original code)
+# system_prompt = """
+# CRITICAL FORMATTING RULES - READ CAREFULLY:
+
+# 1. Extract ALL numeric values EXACTLY as they appear in the document
+# 2. DO NOT modify or reformat any numbers
+# 3. For negative amounts, preserve the EXACT format:
+#    - If minus appears AFTER the number (e.g., "1,234.56-"), keep it there
+#    - If minus appears BEFORE the number (e.g., "-1,234.56"), keep it there
+#    - If number is in parentheses (e.g., "(1,234.56)"), preserve the parentheses
+# 4. Preserve ALL formatting: commas, decimal points, spaces, minus signs
+# 5. Return ALL amounts as STRING values, not numbers
+# 6. Do NOT perform any mathematical conversions or formatting changes
+# 7. Extract the raw text EXACTLY as shown in the PDF
+
+# Examples of what to preserve:
+# - "1,234.56-" stays as "1,234.56-"
+# - "(1,234.56)" stays as "(1,234.56)"
+# - "-1,234.56" stays as "-1,234.56"
+
+# DOCUMENT TYPE CLASSIFICATION - BANK STATEMENT IDENTIFICATION:
+
+# A. Bank-Statement Indicators (Score +1 for each; need ≥3 to pass):
+# - Keywords: "Bank Statement", "Account Statement", "Statement of Account"
+# - Bank identifier: bank name/logo (e.g., "Wells Fargo Bank", "HDFC Bank Ltd.")
+# - Account details: masked/full account number (e.g., "Account #: ××1234")
+# - Statement period: date range (e.g., "01 Apr 2025 – 30 Apr 2025")
+# - Running-balance table with columns: Date | Description | Debit | Credit | Balance
+# - Opening/Closing balance summary (e.g., "Beginning Balance", "Ending Balance")
+
+# A2. MTD / Interim Bank-Statement Indicators (use when headers are missing or sparse; Score +1 each):
+# - Keywords suggesting partial period: "MTD", "Month to Date", "Interim Statement", "As of <date>", "Transactions for <Month YYYY>"
+# - Transaction table begins immediately (often on page 1) with columns like: Date | Description | Amount | (Debit/Credit) | Balance (balance may be missing)
+# - Date column shows many rows from a single month (or a tight recent window) in chronological order
+# - Bank-origin signals inside rows: ACH/CCD/PPD/NEFT/IMPS/UPI/RTGS/SWIFT/BIC/SEPA/CHECK/Cheque No./Routing/IFSC/Sort Code/IBAN
+# - Banking descriptors in lines: "ATM", "POS", "Mobile Deposit", "Online Transfer", "Overdraft/OD", "NSF/Returned Item", "Available Balance"
+# - Page footer/header on any page shows bank name/logo, branch/address, routing/sort/IFSC, or "Customer Service" contacts
+
+# A3. Pass Criteria (two safe paths; choose highest confidence):
+# - Full Statement Path: If Section A score ≥3 AND no exclusions in B → classify as BANK_STATEMENT (set is_bank_statement = TRUE)
+# - MTD Path: If ≥3 indicators from A2 AND at least 1 bank-origin signal (A2 bullets 4, 5, or 6) AND no exclusions in B → classify as BANK_STATEMENT (set is_bank_statement = TRUE)
+
+# B. Hard Exclusion Clues (Any one → immediate reject → NOT_BANK_STATEMENT):
+# - Invoice, receipt, payslip, tax form, insurance policy, loan agreement, term sheet, KYC form, marketing brochure
+# - Phrases: "Invoice #", "Purchase Order", "Salary Slip", "Policy Number", "Form 16", "Prospectus", "Memorandum"
+# - ERP/accounting/general ledger exports without bank-origin signals (e.g., columns like "GL Account", "Vendor ID", "Cost Center", "PO #", "Bill #") even if a "Date/Amount" table exists
+# - Only narrative text with no transaction list
+
+# C. Ambiguity Handling:
+# - If Full Statement Path score = 2 exactly → prefer false (lower risk of false positives) → set is_bank_statement = FALSE
+# - For MTD Path, require the bank-origin signal rule strictly (A2-4/5/6). If exactly 2 A2 indicators or none of (4/5/6) → prefer NOT_BANK_STATEMENT → set is_bank_statement = FALSE
+
+# DOCUMENT TYPE CLASSIFICATION - APPLICATION FORM IDENTIFICATION:
+# Loan-application forms typically contain (one or more of):
+# - Optional headings such as "Loan Application" – but note that some templates omit headings entirely
+# - Fixed-field labels: "Borrower", "Co-Borrower", "Business Name", "Legal Entity", "Owner(s) / Principal(s)", "Loan Amount", "Property Address", "Broker/Originator", "Interest Rate", "Signature", etc.
+# - Structured input areas like check-boxes or multi-column tables for Employment, Assets & Liabilities, Declarations, Business Financials, etc.
+# - Date fields in "MM/DD/YYYY" format beside labels such as "Date of Application" or "Date Prepared"
+# - Form fields, application sections, signature areas, checkboxes, input fields
+
+# Bank-statement first pages typically contain (NOT application forms):
+# - A bank's name or logo followed by a masked account number ("****1234")
+# - "Statement period" or "For the period DD MMM YYYY to DD MMM YYYY"
+# - Balance summary fields: "Opening Balance", "Closing Balance", "Deposits", "Withdrawals"
+# - Postal address of the account holder and disclaimer paragraphs ("Please review your statement carefully…", regulatory footers, etc.)
+
+# Set is_application_form = TRUE if the document is a loan application form (contains the application form characteristics above)
+# Set is_application_form = FALSE if it's a bank statement or other document type
+# If you are < 80% confident, return FALSE as a safe default
+
+# CURRENCY EXTRACTION:
+# - Extract the currency code from the document (look for currency symbols like $, €, £, ₹, etc. or explicit currency codes)
+# - Use ISO 4217 currency codes: USD for US Dollar, EUR for Euro, GBP for British Pound, INR for Indian Rupee, CAD for Canadian Dollar, AUD for Australian Dollar, etc.
+# - If currency is not explicitly stated, infer from currency symbols or context (e.g., $ typically means USD, € means EUR, £ means GBP, ₹ means INR)
+# - Return the 3-letter ISO currency code from the provided enum list
+
+# ACCOUNT INFORMATION EXTRACTION:
+# - Extract the company_name (account holder name or company name) from the statement header
+# - Extract the bank_name (financial institution name) from the statement header or logo area
+# - These are typically found at the top of the statement
+
+# TRANSACTION TABLE EXTRACTION - CRITICAL COMPLETENESS REQUIREMENTS:
+
+# MANDATORY: Extract ALL transactions from the transaction table. Missing even a single transaction is unacceptable.
+
+# Identification of Transaction Table:
+# - Look for tables with headers containing: "Date", "Description", "Transaction Description", "Details", "Debit", "Credit", "Withdrawal", "Deposit", "Amount", "Balance", "Running Balance", "Available Balance" 
+# - The transaction table is the MAIN table showing individual transaction entries with dates, descriptions, and amounts
+# - This table typically spans multiple pages - you MUST check ALL pages of the document
+# - Transaction tables may have different column layouts:
+#   * Format 1: Date | Description | Debit | Credit | Balance
+#   * Format 2: Date | Description | Amount | Balance (where Amount can be positive for credits, negative for debits)
+#   * Format 3: Date | Description | Withdrawal | Deposit | Balance
+#   * Format 4: Date | Description | Amount | Balance (with separate indication of debit/credit)
+# - Some statements may have transactions split across multiple tables or sections - extract from ALL of them
+
+# CRITICAL: SEPARATE DEPOSITS AND WITHDRAWALS SECTIONS:
+# - Many bank statements organize transactions into SEPARATE sections with clear headings:
+#   * "DEPOSITS" or "CREDITS" section (showing money coming in)
+#   * "WITHDRAWALS" or "DEBITS" section (showing money going out)
+#   * "CHECKS" or "CHECQUES" section (showing check transactions)
+#   * "ELECTRONIC TRANSFERS" or "ONLINE TRANSACTIONS" section
+#   * "ATM TRANSACTIONS" section
+#   * "FEE TRANSACTIONS" section
+# - When you see separate sections, you MUST extract transactions from ALL sections
+# - DO NOT extract only from the Deposits/Credits section - you MUST also extract from Withdrawals/Debits section
+# - DO NOT extract only from the Withdrawals/Debits section - you MUST also extract from Deposits/Credits section
+
+# Completeness Requirements:
+# 1. Extract EVERY SINGLE ROW from the transaction table - do not skip any transactions
+# 2. Check ALL pages of the document - transactions may continue across multiple pages
+# 3. Extract transactions from ALL sections if transactions are split into separate sections (Deposits, Withdrawals, Credits, Debits, Checks, etc.) - this is CRITICAL
+# 4. Include transactions that appear in summary sections if they are individual transaction entries
+# 5. Do not exclude any transaction based on amount, type, or description
+
+# Required Fields for Each Transaction (ALL fields are REQUIRED):
+# - date: Extract the transaction date exactly as shown (preserve format: MM/DD/YYYY, DD-MMM-YYYY, etc.)
+# - description: Extract the FULL transaction description/description text exactly as shown in the document
+# - debit: Extract debit amount as EXACT string (if no debit, use empty string "")
+# - credit: Extract credit amount as EXACT string (if no credit, use empty string "")
+# - balance: Extract the running balance as EXACT string with all formatting preserved
+
+# """
+
+
+
+
+
 system_prompt = """
 CRITICAL FORMATTING RULES - READ CAREFULLY:
 
@@ -414,56 +541,210 @@ ACCOUNT INFORMATION EXTRACTION:
 - Extract the bank_name (financial institution name) from the statement header or logo area
 - These are typically found at the top of the statement
 
-TRANSACTION TABLE EXTRACTION - CRITICAL COMPLETENESS REQUIREMENTS:
+TRANSACTION LINE ITEM EXTRACTION - CRITICAL COMPLETENESS REQUIREMENTS:
 
-MANDATORY: Extract ALL transactions from the transaction table. Missing even a single transaction is unacceptable.
+MANDATORY: Extract ALL transaction line items from the entire bank statement. Missing even a single transaction line item is unacceptable.
 
-Identification of Transaction Table:
-- Look for tables with headers containing: "Date", "Description", "Transaction Description", "Details", "Debit", "Credit", "Withdrawal", "Deposit", "Amount", "Balance", "Running Balance", "Available Balance" 
-- The transaction table is the MAIN table showing individual transaction entries with dates, descriptions, and amounts
-- This table typically spans multiple pages - you MUST check ALL pages of the document
-- Transaction tables may have different column layouts:
+Transaction Line Item Structure:
+- Each transaction line item is a continuous row of data with the following fields:
+  * date: Transaction date (REQUIRED)
+  * description: Transaction description/details (REQUIRED)
+  * credit: Credit amount (REQUIRED - use empty string "" if not applicable)
+  * debit: Debit amount (REQUIRED - use empty string "" if not applicable)
+  * amount: Alternative field name - if present, map to credit/debit based on sign (REQUIRED - use empty string "" if not applicable)
+  * balance: Running balance (OPTIONAL - may or may not be present, use empty string "" if not available)
+- These fields appear as continuous columns in table rows across the statement
+- Transaction line items may span multiple pages - you MUST check ALL pages of the document
+
+Identification of Transaction Line Items:
+- Look for tables with headers containing: "Date", "Description", "Transaction Description", "Details", "Debit", "Credit", "Withdrawal", "Deposit", "Amount", "Balance", "Running Balance", "Available Balance"
+- Transaction line items are individual rows in tables showing: Date | Description | Credit/Debit/Amount | (optional) Balance
+- These line items typically span multiple pages - you MUST check ALL pages of the document
+- Transaction line items may have different column layouts:
   * Format 1: Date | Description | Debit | Credit | Balance
   * Format 2: Date | Description | Amount | Balance (where Amount can be positive for credits, negative for debits)
   * Format 3: Date | Description | Withdrawal | Deposit | Balance
   * Format 4: Date | Description | Amount | Balance (with separate indication of debit/credit)
-- Some statements may have transactions split across multiple tables or sections - extract from ALL of them
+- Some statements may have transaction line items split across multiple tables or sections - extract from ALL of them
 
-CRITICAL: SEPARATE DEPOSITS AND WITHDRAWALS SECTIONS:
-- Many bank statements organize transactions into SEPARATE sections with clear headings:
-  * "DEPOSITS" or "CREDITS" section (showing money coming in)
-  * "WITHDRAWALS" or "DEBITS" section (showing money going out)
-  * "CHECKS" or "CHECQUES" section (showing check transactions)
+CRITICAL: TRANSACTIONS SPREAD ACROSS MULTIPLE SECTIONS:
+- Bank statements organize transaction line items into SEPARATE sections with clear headings
+- You MUST extract transaction line items from ALL sections - missing any section means incomplete extraction
+- Common section headings include (but are not limited to):
+  * "Deposits and Additions" (showing money coming in)
+  * "ATM & Debit card withdrawals" (showing ATM and debit card transactions)
+  * "Electronic withdrawals" (showing electronic payment transactions)
+  * "Other withdrawals" (showing other types of withdrawals)
+  * "DEPOSITS" or "CREDITS" section
+  * "WITHDRAWALS" or "DEBITS" section
+  * "CHECKS" or "CHECQUES" section
   * "ELECTRONIC TRANSFERS" or "ONLINE TRANSACTIONS" section
   * "ATM TRANSACTIONS" section
   * "FEE TRANSACTIONS" section
-- When you see separate sections, you MUST extract transactions from ALL sections
-- DO NOT extract only from the Deposits/Credits section - you MUST also extract from Withdrawals/Debits section
-- DO NOT extract only from the Withdrawals/Debits section - you MUST also extract from Deposits/Credits section
+  * "DEPOSITS AND OTHER CREDITS"
+  * "WITHDRAWALS AND OTHER DEBITS"
+  * "CHECKS PAID"
+  * "ELECTRONIC DEBITS"
+  * "ELECTRONIC CREDITS"
+  * "ATM WITHDRAWALS"
+  * "ONLINE TRANSFERS"
+- Each section may have its own table with Date, Description, Credit/Debit/Amount, and (optional) Balance columns
+- Extract ALL transaction line items from EACH section independently
+- DO NOT skip any section - if you see "Deposits and Additions", you MUST also look for "ATM & Debit card withdrawals", "Electronic withdrawals", "Other withdrawals", etc.
+- DO NOT assume that extracting from one section is sufficient - always search for ALL transaction sections
+- Combine all extracted transaction line items into a single transactions array in chronological order (by date)
+- For transactions in Deposits/Credits/Additions sections: put the amount in the "credit" field, leave "debit" as empty string ""
+- For transactions in Withdrawals/Debits sections: put the amount in the "debit" field, leave "credit" as empty string ""
+- If a section has a balance column, extract it for each transaction line item
+- If balance is not shown in a section, leave it as empty string "" but still extract the transaction line item
+
+Example: If a statement has:
+- "Deposits and Additions" section with 25 transaction line items
+- "ATM & Debit card withdrawals" section with 30 transaction line items
+- "Electronic withdrawals" section with 20 transaction line items
+- "Other withdrawals" section with 10 transaction line items
+You MUST extract all 85 transaction line items (25 + 30 + 20 + 10) into the transactions array.
+
+VERIFICATION CHECKLIST for Multiple Sections:
+1. Scan the entire document for ALL section headings (Deposits and Additions, ATM & Debit card withdrawals, Electronic withdrawals, Other withdrawals, Credits, Debits, Checks, etc.)
+2. Count the number of transaction line items in EACH section
+3. Extract ALL transaction line items from EACH identified section
+4. Verify that your total transaction line item count = sum of all transaction line items from all sections
+5. Ensure you have both credits (deposits/additions) AND debits (withdrawals) in your final array
+6. If you only see one type of section, search more carefully for other sections - they may be on different pages or have different headings
+7. Check for variations in section naming (e.g., "Deposits and Additions" vs "Deposits" vs "Credits")
 
 Completeness Requirements:
-1. Extract EVERY SINGLE ROW from the transaction table - do not skip any transactions
-2. Check ALL pages of the document - transactions may continue across multiple pages
-3. Extract transactions from ALL sections if transactions are split into separate sections (Deposits, Withdrawals, Credits, Debits, Checks, etc.) - this is CRITICAL
-4. Include transactions that appear in summary sections if they are individual transaction entries
-5. Do not exclude any transaction based on amount, type, or description
+1. Extract EVERY SINGLE transaction line item row from the entire statement - do not skip any transactions
+2. Check ALL pages of the document - transaction line items may continue across multiple pages
+3. Look for continuation indicators like "Continued on next page" or page numbers
+4. Extract transaction line items from ALL transaction tables if multiple tables exist
+5. Extract transaction line items from ALL sections if transactions are split into separate sections - this is CRITICAL
+6. Include transaction line items that appear in summary sections if they are individual transaction entries
+7. Do not exclude any transaction line item based on amount, type, or description
+8. If a transaction line item spans multiple lines, combine them into a single transaction entry
+9. If you find one section (e.g., "Deposits and Additions"), you MUST also look for and extract from other sections (e.g., "ATM & Debit card withdrawals", "Electronic withdrawals", "Other withdrawals") - extracting only one section is INCOMPLETE
+10. Verify that your extracted transaction line items include BOTH credits (money in) AND debits (money out) - if you only have one type, you are missing data
 
-Required Fields for Each Transaction (ALL fields are REQUIRED):
-- date: Extract the transaction date exactly as shown (preserve format: MM/DD/YYYY, DD-MMM-YYYY, etc.)
-- description: Extract the FULL transaction description/description text exactly as shown in the document
-- debit: Extract debit amount as EXACT string (if no debit, use empty string "")
-- credit: Extract credit amount as EXACT string (if no credit, use empty string "")
-- balance: Extract the running balance as EXACT string with all formatting preserved
+Required Fields for Each Transaction Line Item:
+- date: Extract the transaction date exactly as shown (preserve format: MM/DD/YYYY, DD-MMM-YYYY, etc.) - REQUIRED
+- description: Extract the FULL transaction description/description text exactly as shown in the document - REQUIRED
+- debit: Extract debit amount as EXACT string (if no debit, use empty string "") - REQUIRED
+- credit: Extract credit amount as EXACT string (if no credit, use empty string "") - REQUIRED
+- balance: Extract the running balance as EXACT string with all formatting preserved (if not present, use empty string "") - OPTIONAL
 
-DAILY ENDING BALANCE TABLE EXTRACTION:
-- Look for a table titled "BALANCE BY DATE" or similar heading
-- This table has DATE and BALANCE columns
-- Extract ALL date-balance pairs from this table
+Field Extraction Rules:
+- If the table has separate Debit and Credit columns:
+  * Extract debit amount from Debit column (preserve exact format including minus signs, parentheses, trailing minus)
+  * Extract credit amount from Credit column (preserve exact format)
+  * If a cell is empty or shows "-", use empty string ""
+- If the table has a single Amount column:
+  * If amount is positive or has no sign → put it in credit field, leave debit as ""
+  * If amount is negative, has trailing minus, or is in parentheses → put absolute value in debit field, leave credit as ""
+  * Preserve the exact format when extracting
+- Balance field: Extract the running balance exactly as shown, preserving all formatting (commas, decimals, minus signs, trailing minus, parentheses). If balance column is not present in a section, use empty string ""
+- Description field: Extract the complete description text, including payee names, transaction types, reference numbers, memo fields, etc.
 
-NSF (NON-SUFFICIENT FUNDS) EXTRACTION:
-- Include: ACH returns for insufficient/uncollected funds (NACHA codes R01, R09), cheque/check returns for insufficient/uncollected funds, and their associated fees
-- Exclude: Overdraft fees/interest/transfers, fee reversals, stop-payment fees, documentation issues
+Quality Checks:
+- Count the total number of transaction line item rows visible across ALL sections in the document
+- Ensure your extracted transactions array matches this count
+- Verify that every date in the statement period has been checked for transaction line items
+- Cross-check that no transaction line item rows were skipped between pages
+- If you find continuation markers, ensure you've extracted from all continuation pages
+- Verify that you've extracted from ALL identified sections (Deposits and Additions, ATM & Debit card withdrawals, Electronic withdrawals, Other withdrawals, etc.)
+
+Common Pitfalls to Avoid:
+- DO NOT skip transaction line items that appear small or insignificant
+- DO NOT skip header/footer rows that might contain transaction data
+- DO NOT stop extraction at page boundaries - continue to the next page
+- DO NOT exclude transaction line items based on description keywords
+- DO NOT skip transaction line items with zero amounts if they appear in the table
+- DO NOT miss transaction line items that appear in summary or subtotal sections if they are individual entries
+- DO NOT extract only from one section (e.g., "Deposits and Additions") and miss other sections (e.g., "ATM & Debit card withdrawals", "Electronic withdrawals", "Other withdrawals") - this is a CRITICAL ERROR
+- DO NOT assume that if you see one section, there aren't other sections elsewhere in the document
+- DO NOT stop after extracting one section - always search for ALL transaction sections in the document
+- DO NOT miss sections with different naming conventions (e.g., "Deposits" vs "Deposits and Additions")
+
+Examples of Complete Transaction Line Item Extraction:
+- If a statement has 150 transaction line items across 5 pages, you must extract all 150 transaction line items
+- If transaction line items are split into "Deposits and Additions" (20 items), "ATM & Debit card withdrawals" (35 items), "Electronic withdrawals" (15 items), and "Other withdrawals" (10 items) sections, extract from ALL sections - this is MANDATORY → you must extract all 80 transaction line items (20 + 35 + 15 + 10)
+- Example: Statement has "Deposits and Additions" section with 25 transaction line items, "ATM & Debit card withdrawals" with 30 transaction line items, and "Electronic withdrawals" with 20 transaction line items → you must extract all 75 transaction line items (25 + 30 + 20)
+- If there are transaction line items in both a main table and a "Recent Transactions" section, extract from BOTH
+- If continuation pages exist, extract transaction line items from ALL continuation pages
+- If you only extracted from one section but the statement has multiple sections, you are INCOMPLETE - search the document again for all missing sections
+
+Remember: Completeness is CRITICAL. It is better to extract a transaction line item with incomplete data (using empty strings for missing fields) than to skip it entirely. Every transaction line item row visible in the document across ALL sections MUST appear in your extracted transactions array.
+
+FINAL VERIFICATION: Before finalizing your extraction, ask yourself:
+1. Did I identify and extract from ALL transaction sections in the document? (Deposits and Additions, ATM & Debit card withdrawals, Electronic withdrawals, Other withdrawals, etc.)
+2. Do I have transaction line items with both credit amounts AND debit amounts in my array?
+3. If I only see one type of section, did I search thoroughly for other sections (they may be on different pages or have different headings)?
+4. Have I checked ALL pages of the document for transaction line items across all sections?
+5. Is my transaction line item count matching the total visible in all sections combined?
+6. Did I extract from sections that may have different naming (e.g., "Deposits" vs "Deposits and Additions")?
+
+If your answer to any of these is "no" or "unsure", you MUST search the document again and extract the missing transaction line items from all sections.
+
+
+FEES TABLE EXTRACTION:
+
+CRITICAL: ONLY extract fees if there is an EXPLICIT, DEDICATED fees table or fees section in the document.
+
+What to look for (explicit fees table indicators):
+- A table with a clear heading/title such as: "Fees", "Service Charges", "Fee Summary", "Charges", "Fee Details", "Service Fee Details", etc.
+- A dedicated section clearly labeled as fees/charges with structured rows/columns
+- A separate table listing individual fee transactions (not just a summary total)
+
+What to IGNORE:
+- DO NOT extract individual fee transactions from the main transaction table
+- DO NOT extract summary/total fees (e.g., "Total Fees: $50.00", "Fees This Period: $25.00")
+- DO NOT extract fees that appear only as regular transaction entries in the main transaction table
+- DO NOT create a fees table from fee-related transactions found in the main transaction table
+
+Detection Rules (ONLY if explicit fees table exists):
+- Look for a dedicated table or section with a fees-related title/heading
+- Extract individual fee entries from that dedicated table only
+- Preserve the exact amount format (including minus signs, parentheses, trailing minus, etc.)
+- Extract the fee type by identifying the specific fee category from the description
+- Include the date, description, amount, fee_type, and balance (if available) for each fee entry from the dedicated table
+- For each fee entry, set is_included_in_transaction_table to TRUE if the same fee transaction (matching date, description, and amount) also appears in the main transactions table, FALSE otherwise
+
+Fee Type Classification (if explicit fees table exists):
+- Identify and categorize the fee type from the description (e.g., "Monthly Service Fee", "NSF Fee", "ATM Fee", "Overdraft Fee", etc.)
+- If the fee type is not clearly identifiable, use a general term like "Service Fee" or "Transaction Fee"
+- For fee reversals, include "Reversal" or "Refund" in the fee_type (e.g., "NSF Fee Reversal")
+
+Examples of explicit fees tables to extract from:
+- A table titled "Fees" with columns: Date | Description | Amount
+- A section titled "Service Charges" listing individual fees
+- A dedicated "Fee Summary" table with detailed fee entries
+
+Examples of what NOT to extract:
+- Individual fee transactions from the main transaction table (e.g., "06/15 | Monthly Service Fee | -12.00" appearing in the regular transactions)
+- Summary totals like "Total Service Charges: $45.00"
+- Fee amounts shown only in summary sections
+
+Return an empty array [] if:
+- No explicit fees table is found in the document
+- Only summary/total fees are present without a detailed fees table
+- Fees only appear in the main transaction table without a dedicated fees table
+
+CHEQUES TABLE EXTRACTION:
+
+Extract ALL cheque-related information from the cheques table. This is a separate table from the main transactions table.
+
+For each cheque entry:
+- Extract cheque_number, date, amount, status (if available), and description
+- Set is_included_in_transaction_table to TRUE if the same cheque transaction (matching cheque number, date, and amount) also appears in the main transactions table, FALSE otherwise
+- Compare the cheque entry with transactions in the main transactions table by matching cheque number, date, and amount to determine if it's included
+
+Examples:
+- Cheque #1042 on 06/02 for ₹18,750.00 that also appears in transactions table → is_included_in_transaction_table: true
+- Cheque #1043 on 06/05 for ₹5,000.00 that does NOT appear in transactions table → is_included_in_transaction_table: false
+
+Return an empty array [] if no cheques are found.
 """
+
 
 schema = {
     "type": "object",
@@ -630,74 +911,74 @@ schema = {
         "ending_balance": {
             "type": ["string", "null"],
             "description": "Ending balance as exact string. Return null if not found."
-        },
-        "nsf_data": {
-            "type": "object",
-            "description": "NSF (Non-Sufficient Funds) events.",
-            "properties": {
-                "events": {
-                    "type": "array",
-                    "description": "Array of NSF events",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "ach_return_code": {
-                                "anyOf": [
-                                    {"type": "string", "enum": ["R01", "R09"]},
-                                    {"type": "null"}
-                                ],
-                                "description": "ACH return code"
-                            },
-                            "date_posted": {
-                                "type": ["string", "null"],
-                                "description": "Date when the NSF event was posted"
-                            },
-                            "counterparty_name": {
-                                "type": ["string", "null"],
-                                "description": "Counterparty name"
-                            },
-                            "original_attempt_amount": {
-                                "type": ["number", "null"],
-                                "description": "Original amount that was attempted"
-                            },
-                            "fee_amount": {
-                                "type": ["number", "null"],
-                                "description": "NSF fee amount"
-                            },
-                            "description_raw": {
-                                "type": "string",
-                                "description": "Exact source text"
-                            },
-                            "confidence": {
-                                "type": "number",
-                                "description": "Confidence score 0.0-1.0"
-                            }
-                        },
-                        "required": ["ach_return_code", "date_posted", "counterparty_name", "original_attempt_amount", "fee_amount", "description_raw", "confidence"]
-                    }
-                },
-                "summary": {
-                    "type": "object",
-                    "description": "Summary statistics",
-                    "properties": {
-                        "total_nsf_fees": {
-                            "type": "number",
-                            "description": "Sum of all fee amounts"
-                        },
-                        "unique_days_with_nsf": {
-                            "type": "integer",
-                            "description": "Count of distinct dates"
-                        },
-                        "max_nsfs_in_any_7day_window": {
-                            "type": "integer",
-                            "description": "Max NSF events in any 7-day window"
-                        }
-                    },
-                    "required": ["total_nsf_fees", "unique_days_with_nsf", "max_nsfs_in_any_7day_window"]
-                }
-            },
-            "required": ["events", "summary"]
         }
+        # "nsf_data": {
+        #     "type": "object",
+        #     "description": "NSF (Non-Sufficient Funds) events.",
+        #     "properties": {
+        #         "events": {
+        #             "type": "array",
+        #             "description": "Array of NSF events",
+        #             "items": {
+        #                 "type": "object",
+        #                 "properties": {
+        #                     "ach_return_code": {
+        #                         "anyOf": [
+        #                             {"type": "string", "enum": ["R01", "R09"]},
+        #                             {"type": "null"}
+        #                         ],
+        #                         "description": "ACH return code"
+        #                     },
+        #                     "date_posted": {
+        #                         "type": ["string", "null"],
+        #                         "description": "Date when the NSF event was posted"
+        #                     },
+        #                     "counterparty_name": {
+        #                         "type": ["string", "null"],
+        #                         "description": "Counterparty name"
+        #                     },
+        #                     "original_attempt_amount": {
+        #                         "type": ["number", "null"],
+        #                         "description": "Original amount that was attempted"
+        #                     },
+        #                     "fee_amount": {
+        #                         "type": ["number", "null"],
+        #                         "description": "NSF fee amount"
+        #                     },
+        #                     "description_raw": {
+        #                         "type": "string",
+        #                         "description": "Exact source text"
+        #                     },
+        #                     "confidence": {
+        #                         "type": "number",
+        #                         "description": "Confidence score 0.0-1.0"
+        #                     }
+        #                 },
+        #                 "required": ["ach_return_code", "date_posted", "counterparty_name", "original_attempt_amount", "fee_amount", "description_raw", "confidence"]
+        #             }
+        #         },
+        #         "summary": {
+        #             "type": "object",
+        #             "description": "Summary statistics",
+        #             "properties": {
+        #                 "total_nsf_fees": {
+        #                     "type": "number",
+        #                     "description": "Sum of all fee amounts"
+        #                 },
+        #                 "unique_days_with_nsf": {
+        #                     "type": "integer",
+        #                     "description": "Count of distinct dates"
+        #                 },
+        #                 "max_nsfs_in_any_7day_window": {
+        #                     "type": "integer",
+        #                     "description": "Max NSF events in any 7-day window"
+        #                 }
+        #             },
+        #             "required": ["total_nsf_fees", "unique_days_with_nsf", "max_nsfs_in_any_7day_window"]
+        #         }
+        #     },
+        #     "required": ["events", "summary"]
+        # }
     },
     "required": [
         "company_name",
@@ -712,8 +993,8 @@ schema = {
         "cheques",
         "fees",
         "starting_balance",
-        "ending_balance",
-        "nsf_data"
+        "ending_balance"
+        # "nsf_data"
     ]
 }
 
